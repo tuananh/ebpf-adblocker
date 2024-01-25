@@ -1,0 +1,4 @@
+*.o
+ebpf-adblocker
+dns_bpfeb.go
+dns_bpfel.go
