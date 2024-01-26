@@ -35,13 +35,13 @@ func main() {
 	// Look up the network interface by name.
 	devID, err := net.InterfaceByName(*ifaceName)
 	if err != nil {
-		slog.Error("lookup network iface %s: %s", *ifaceName, err)
+		slog.Error("lookup network iface failed", "iface", *ifaceName, "err", err)
 	}
 
 	// Load pre-compiled programs into the kernel.
 	objs := dnsObjects{}
 	if err := loadDnsObjects(&objs, nil); err != nil {
-		slog.Error("loading objects: %s", err)
+		slog.Error("loading objects failed", "err", err)
 	}
 
 	defer objs.Close()
@@ -112,7 +112,7 @@ func main() {
 	}
 
 	if err := netlink.FilterReplace(filterIngress); err != nil {
-		slog.Error("failed to replace tc filter", err)
+		slog.Error("failed to replace tc filter", "err", err)
 	}
 
 	filterEgress := &netlink.BpfFilter{
@@ -128,7 +128,7 @@ func main() {
 	}
 
 	if err := netlink.FilterReplace(filterEgress); err != nil {
-		slog.Error("failed to replace tc filter", err)
+		slog.Error("failed to replace tc filter", "err", err)
 	}
 
 	slog.Info("Press Ctrl-C to exit and remove the program")
@@ -145,7 +145,7 @@ func main() {
 
 	f, err := netlink.FilterList(link, netlink.HANDLE_MIN_INGRESS)
 	if err != nil {
-		slog.Error("could not list filters: %v", err)
+		slog.Error("could not list filters", "err", err)
 	}
 
 	if len(f) == 0 {
@@ -154,13 +154,13 @@ func main() {
 	for x := range f {
 		err = netlink.FilterDel(f[x])
 		if err != nil {
-			slog.Error("could not get remove filter: %v", err)
+			slog.Error("could not get remove filter", "err", err)
 		}
 	}
 
 	f, err = netlink.FilterList(link, netlink.HANDLE_MIN_EGRESS)
 	if err != nil {
-		slog.Error("could not list filters: %v", err)
+		slog.Error("could not list filters", "err", err)
 	}
 
 	if len(f) == 0 {
@@ -169,7 +169,7 @@ func main() {
 	for x := range f {
 		err = netlink.FilterDel(f[x])
 		if err != nil {
-			slog.Error("could not get remove filter: %v", err)
+			slog.Error("could not get remove filter", "err", err)
 		}
 	}
 }
