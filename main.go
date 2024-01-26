@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"os/signal"
@@ -14,7 +15,6 @@ import (
 	"syscall"
 
 	"github.com/praserx/ipconv"
-	log "github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
@@ -24,44 +24,65 @@ import (
 func main() {
 
 	ifaceName := flag.String("interface", "eth0", "The interface to watch network traffic on")
-	findName := flag.String("findDomain", "", "The domain to watch for")
-	replaceRecord := flag.String("replaceRecord", "", "The A record to replace for that particular domain")
+	blocklist := flag.String("blocklist", "blocklist.txt", "The blocklist file")
 
 	flag.Parse()
 
-	log.Infof("Starting 🐝 the eBPF DNS watcher, on interface [%s]", *ifaceName)
+	slog.Info("Starting eBPF Adblocker...", "interface", *ifaceName)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	// Look up the network interface by name.
 	devID, err := net.InterfaceByName(*ifaceName)
 	if err != nil {
-		log.Fatalf("lookup network iface %s: %s", *ifaceName, err)
+		slog.Error("lookup network iface %s: %s", *ifaceName, err)
 	}
 
 	// Load pre-compiled programs into the kernel.
 	objs := dnsObjects{}
 	if err := loadDnsObjects(&objs, nil); err != nil {
-		log.Fatalf("loading objects: %s", err)
+		slog.Error("loading objects: %s", err)
 	}
 
 	defer objs.Close()
-	// Parse the URL Path
-	var dnsName [256]uint8
-	var convertedName [256]uint8
 
-	copy(dnsName[:], *findName)
+	file, err := os.Open(*blocklist)
+	if err != nil {
+		slog.Error("could not open blocklist file", "err", err)
+		os.Exit(1)
+	}
+	r := bufio.NewReader(file)
+	line, err := readLine(r)
+	for err == nil {
+		parts := strings.Split(line, " ")
+		if len(parts) != 2 {
+			slog.Error("invalid blocklist rule", "rule", line)
+			os.Exit(1)
+		}
 
-	if *findName != "" || *replaceRecord != "" {
+		domain := parts[0]
+		ip := parts[1]
 
-		address, _ := ipconv.IPv4ToInt(net.ParseIP(*replaceRecord))
-		tempName := ConvertDomain(*findName)
+		// Parse the URL Path
+		var dnsName [256]uint8
+		var convertedName [256]uint8
+
+		copy(dnsName[:], domain)
+
+		address, _ := ipconv.IPv4ToInt(net.ParseIP(ip))
+		tempName := ConvertDomain(domain)
 		copy(convertedName[:], tempName)
 		err = objs.DnsMap.Put(convertedName, dnsDnsReplace{dnsName, HostToNetLong(address)})
 		if err != nil {
-			log.Fatalf("add to map failed %v", err)
+			slog.Error("add to map failed", "domain", domain, "err", err)
+		} else {
+			slog.Info("rule loaded", "domain", domain, "ip", ip)
 		}
+
+		line, err = readLine(r)
 	}
+
+	slog.Info("blocklist loaded from", "file", *blocklist)
 
 	qdisc := &netlink.GenericQdisc{
 		QdiscAttrs: netlink.QdiscAttrs{
@@ -74,9 +95,9 @@ func main() {
 
 	err = netlink.QdiscReplace(qdisc)
 	if err != nil {
-		log.Fatalf("could not get replace qdisc: %v", err)
+		slog.Error("could not get replace qdisc:", "err", err)
 	}
-	log.Info("Loaded TC QDisc")
+	slog.Info("Loaded TC QDisc")
 
 	filterIngress := &netlink.BpfFilter{
 		FilterAttrs: netlink.FilterAttrs{
@@ -91,7 +112,7 @@ func main() {
 	}
 
 	if err := netlink.FilterReplace(filterIngress); err != nil {
-		log.Fatalf("failed to replace tc filter: %v", err)
+		slog.Error("failed to replace tc filter", err)
 	}
 
 	filterEgress := &netlink.BpfFilter{
@@ -107,75 +128,85 @@ func main() {
 	}
 
 	if err := netlink.FilterReplace(filterEgress); err != nil {
-		log.Fatalf("failed to replace tc filter: %v", err)
+		slog.Error("failed to replace tc filter", err)
 	}
 
-	log.Printf("Press Ctrl-C to exit and remove the program")
+	slog.Info("Press Ctrl-C to exit and remove the program")
 
 	// Drop the logs
 	go cat()
 	<-ctx.Done() // We wait here
-	log.Info("Removing eBPF programs")
+	slog.Info("Removing eBPF programs")
 
 	link, err := netlink.LinkByName(*ifaceName)
 	if err != nil {
-		log.Fatalf("could not find iface: %v", err)
+		slog.Error("could not find iface: %v", err)
 	}
 
 	f, err := netlink.FilterList(link, netlink.HANDLE_MIN_INGRESS)
 	if err != nil {
-		log.Fatalf("could not list filters: %v", err)
+		slog.Error("could not list filters: %v", err)
 	}
 
 	if len(f) == 0 {
-		log.Error("Unable to clean any filters")
+		slog.Error("Unable to clean any filters")
 	}
 	for x := range f {
 		err = netlink.FilterDel(f[x])
 		if err != nil {
-			log.Fatalf("could not get remove filter: %v", err)
+			slog.Error("could not get remove filter: %v", err)
 		}
 	}
 
 	f, err = netlink.FilterList(link, netlink.HANDLE_MIN_EGRESS)
 	if err != nil {
-		log.Fatalf("could not list filters: %v", err)
+		slog.Error("could not list filters: %v", err)
 	}
 
 	if len(f) == 0 {
-		log.Error("Unable to clean any filters")
+		slog.Error("Unable to clean any filters")
 	}
 	for x := range f {
 		err = netlink.FilterDel(f[x])
 		if err != nil {
-			log.Fatalf("could not get remove filter: %v", err)
+			slog.Error("could not get remove filter: %v", err)
 		}
 	}
 }
 
-func readLines(r io.Reader) {
-	rd := bufio.NewReader(r)
+func readLine(r *bufio.Reader) (string, error) {
+	var (
+		isPrefix bool  = true
+		err      error = nil
+		line, ln []byte
+	)
+	for isPrefix && err == nil {
+		line, isPrefix, err = r.ReadLine()
+		ln = append(ln, line...)
+	}
+	return string(ln), err
+}
+
+func cat() {
+	file, err := os.Open("/sys/kernel/tracing/trace_pipe")
+	if err != nil {
+		slog.Error("could not read trace_pipe", "err", err)
+	}
+	defer file.Close()
+
+	rd := bufio.NewReader(file)
 	for {
 		line, err := rd.ReadString('\n')
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			log.Fatal(err)
+			slog.Error("error while reading line", "err", err)
 		}
 
 		fmt.Printf("%s", line)
 
 	}
-}
-
-func cat() {
-	file, err := os.Open("/sys/kernel/tracing/trace_pipe")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer file.Close()
-	readLines(file)
 }
 
 // HostToNetLong converts a 32-bit integer from host to network byte order, aka "htonl"
