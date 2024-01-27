@@ -54,29 +54,32 @@ func main() {
 	r := bufio.NewReader(file)
 	line, err := readLine(r)
 	for err == nil {
-		parts := strings.Split(line, " ")
-		if len(parts) != 2 {
-			slog.Error("invalid blocklist rule", "rule", line)
-			os.Exit(1)
-		}
+		// ignore if line start with #
+		if !strings.HasPrefix(line, "#") {
+			parts := strings.Split(line, " ")
+			if len(parts) != 2 {
+				slog.Error("invalid blocklist rule", "rule", line)
+				os.Exit(1)
+			}
 
-		domain := parts[0]
-		ip := parts[1]
+			ip := parts[0]
+			domain := parts[1]
 
-		// Parse the URL Path
-		var dnsName [256]uint8
-		var convertedName [256]uint8
+			// Parse the URL Path
+			var dnsName [256]uint8
+			var convertedName [256]uint8
 
-		copy(dnsName[:], domain)
+			copy(dnsName[:], domain)
 
-		address, _ := ipconv.IPv4ToInt(net.ParseIP(ip))
-		tempName := ConvertDomain(domain)
-		copy(convertedName[:], tempName)
-		err = objs.DnsMap.Put(convertedName, dnsDnsReplace{dnsName, HostToNetLong(address)})
-		if err != nil {
-			slog.Error("add to map failed", "domain", domain, "err", err)
-		} else {
-			slog.Info("rule loaded", "domain", domain, "ip", ip)
+			ipAddr, _ := ipconv.IPv4ToInt(net.ParseIP(ip))
+			tempName := convertDomain(domain)
+			copy(convertedName[:], tempName)
+			err = objs.DnsMap.Put(convertedName, dnsDnsReplace{dnsName, htonl(ipAddr)})
+			if err != nil {
+				slog.Error("add to map failed", "domain", domain, "err", err)
+			} else {
+				slog.Info("rule loaded", "domain", domain, "ip", ip)
+			}
 		}
 
 		line, err = readLine(r)
@@ -97,7 +100,7 @@ func main() {
 	if err != nil {
 		slog.Error("could not get replace qdisc:", "err", err)
 	}
-	slog.Info("Loaded TC QDisc")
+	slog.Info("qdisc replaced")
 
 	filterIngress := &netlink.BpfFilter{
 		FilterAttrs: netlink.FilterAttrs{
@@ -209,16 +212,16 @@ func cat() {
 	}
 }
 
-// HostToNetLong converts a 32-bit integer from host to network byte order, aka "htonl"
-func HostToNetLong(i uint32) uint32 {
+// htonl converts a 32-bit integer from host to network byte order
+// https://linux.die.net/man/3/htonl
+func htonl(i uint32) uint32 {
 	b := make([]byte, 4)
 	binary.LittleEndian.PutUint32(b, i)
 	return binary.BigEndian.Uint32(b)
 }
 
-func ConvertDomain(name string) []byte {
+func convertDomain(name string) []byte {
 	var convertedName []byte
-	//var charCount uint8
 	var charPointer int
 	subDomains := strings.Split(name, ".")
 	for x := range subDomains {
@@ -226,6 +229,5 @@ func ConvertDomain(name string) []byte {
 		convertedName = append(convertedName, subDomains[x]...)
 		charPointer = charPointer + 1 + len(subDomains[x])
 	}
-	//convertedName = append(convertedName, uint8(0))
 	return convertedName
 }
