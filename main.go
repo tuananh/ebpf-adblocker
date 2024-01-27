@@ -22,37 +22,35 @@ import (
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -cflags "-O2 -g -Wall -Werror" dns ./ebpf/dns.c -- -I./headers
 
 func main() {
-
-	ifaceName := flag.String("interface", "eth0", "The interface to watch network traffic on")
+	ifname := flag.String("interface", "eth0", "The interface to watch network traffic on")
 	blocklist := flag.String("blocklist", "blocklist.txt", "The blocklist file")
 
 	flag.Parse()
 
-	slog.Info("Starting eBPF Adblocker...", "interface", *ifaceName)
+	slog.Info("Starting eBPF Adblocker...", "interface", *ifname)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	// Look up the network interface by name.
-	devID, err := net.InterfaceByName(*ifaceName)
+
+	devID, err := net.InterfaceByName(*ifname)
 	if err != nil {
-		slog.Error("lookup network iface failed", "iface", *ifaceName, "err", err)
+		slog.Error("lookup network iface failed", "iface", *ifname, "err", err)
 	}
 
-	// Load pre-compiled programs into the kernel.
-	objs := dnsObjects{}
-	if err := loadDnsObjects(&objs, nil); err != nil {
+	dns := dnsObjects{}
+	if err := loadDnsObjects(&dns, nil); err != nil {
 		slog.Error("loading objects failed", "err", err)
 	}
 
-	defer objs.Close()
+	defer dns.Close()
 
 	file, err := os.Open(*blocklist)
 	if err != nil {
 		slog.Error("could not open blocklist file", "err", err)
 		os.Exit(1)
 	}
-	r := bufio.NewReader(file)
-	line, err := readLine(r)
+	reader := bufio.NewReader(file)
+	line, err := readLine(reader)
 	for err == nil {
 		// ignore if line start with #
 		if !strings.HasPrefix(line, "#") {
@@ -72,17 +70,17 @@ func main() {
 			copy(dnsName[:], domain)
 
 			ipAddr, _ := ipconv.IPv4ToInt(net.ParseIP(ip))
-			tempName := convertDomain(domain)
-			copy(convertedName[:], tempName)
-			err = objs.DnsMap.Put(convertedName, dnsDnsReplace{dnsName, htonl(ipAddr)})
+			arecord := htonl(ipAddr)
+			copy(convertedName[:], convertDomain(domain))
+			err = dns.DnsMap.Put(convertedName, dnsDnsReplace{dnsName, arecord})
 			if err != nil {
 				slog.Error("add to map failed", "domain", domain, "err", err)
 			} else {
-				slog.Info("rule loaded", "domain", domain, "ip", ip)
+				slog.Info("added to map", "domain", domain, "ip", ip)
 			}
 		}
 
-		line, err = readLine(r)
+		line, err = readLine(reader)
 	}
 
 	slog.Info("blocklist loaded from", "file", *blocklist)
@@ -98,7 +96,7 @@ func main() {
 
 	err = netlink.QdiscReplace(qdisc)
 	if err != nil {
-		slog.Error("could not get replace qdisc:", "err", err)
+		slog.Error("failed to replace qdisc:", "err", err)
 	}
 	slog.Info("qdisc replaced")
 
@@ -109,8 +107,8 @@ func main() {
 			Handle:    1,
 			Protocol:  unix.ETH_P_ALL,
 		},
-		Fd:           objs.TcIngress.FD(),
-		Name:         objs.TcIngress.String(),
+		Fd:           dns.TcIngress.FD(),
+		Name:         dns.TcIngress.String(),
 		DirectAction: true,
 	}
 
@@ -125,8 +123,8 @@ func main() {
 			Handle:    1,
 			Protocol:  unix.ETH_P_ALL,
 		},
-		Fd:           objs.TcEgress.FD(),
-		Name:         objs.TcEgress.String(),
+		Fd:           dns.TcEgress.FD(),
+		Name:         dns.TcEgress.String(),
 		DirectAction: true,
 	}
 
@@ -138,43 +136,49 @@ func main() {
 
 	// Drop the logs
 	go cat()
-	<-ctx.Done() // We wait here
+	<-ctx.Done()
 	slog.Info("Removing eBPF programs")
 
-	link, err := netlink.LinkByName(*ifaceName)
+	cleanup(ifname)
+}
+
+func cleanup(ifname *string) error {
+	link, err := netlink.LinkByName(*ifname)
 	if err != nil {
 		slog.Error("could not find iface: %v", err)
 	}
 
-	f, err := netlink.FilterList(link, netlink.HANDLE_MIN_INGRESS)
+	filters, err := netlink.FilterList(link, netlink.HANDLE_MIN_INGRESS)
 	if err != nil {
 		slog.Error("could not list filters", "err", err)
 	}
 
-	if len(f) == 0 {
-		slog.Error("Unable to clean any filters")
+	if len(filters) == 0 {
+		slog.Error("unable to clean any filters")
 	}
-	for x := range f {
-		err = netlink.FilterDel(f[x])
+	for x := range filters {
+		err = netlink.FilterDel(filters[x])
 		if err != nil {
 			slog.Error("could not get remove filter", "err", err)
 		}
 	}
 
-	f, err = netlink.FilterList(link, netlink.HANDLE_MIN_EGRESS)
+	filters, err = netlink.FilterList(link, netlink.HANDLE_MIN_EGRESS)
 	if err != nil {
 		slog.Error("could not list filters", "err", err)
 	}
 
-	if len(f) == 0 {
-		slog.Error("Unable to clean any filters")
+	if len(filters) == 0 {
+		slog.Error("unable to clean any filters")
 	}
-	for x := range f {
-		err = netlink.FilterDel(f[x])
+	for i := range filters {
+		err = netlink.FilterDel(filters[i])
 		if err != nil {
 			slog.Error("could not get remove filter", "err", err)
 		}
 	}
+
+	return nil
 }
 
 func readLine(r *bufio.Reader) (string, error) {
@@ -222,12 +226,10 @@ func htonl(i uint32) uint32 {
 
 func convertDomain(name string) []byte {
 	var convertedName []byte
-	var charPointer int
-	subDomains := strings.Split(name, ".")
-	for x := range subDomains {
-		convertedName = append(convertedName, uint8(len(subDomains[x])))
-		convertedName = append(convertedName, subDomains[x]...)
-		charPointer = charPointer + 1 + len(subDomains[x])
+	parts := strings.Split(name, ".")
+	for x := range parts {
+		convertedName = append(convertedName, uint8(len(parts[x])))
+		convertedName = append(convertedName, parts[x]...)
 	}
 	return convertedName
 }
