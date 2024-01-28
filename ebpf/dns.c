@@ -85,7 +85,7 @@ static inline int read_dns(struct __sk_buff *skb) {
       }
       // qr == 0 is a query
       if (dns_hdr->qr == 0 && dns_hdr->opcode == 0) {
-        bpf_printk("DNS query transaction id %u",
+        bpf_printk("query transaction_id %u",
                    bpf_ntohs(dns_hdr->transaction_id));
       }
 
@@ -106,7 +106,7 @@ static inline int read_dns(struct __sk_buff *skb) {
         if (sizeof(q.name) != 0) {
           found_name = bpf_map_lookup_elem(&dns_map, q.name);
           if (found_name > 0) {
-            bpf_printk("Looks like we've found your name [%s]",
+            bpf_printk("found in blocklist map => blocking [%s]",
                        found_name->name);
           }
         }
