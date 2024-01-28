@@ -27,7 +27,7 @@ func main() {
 
 	flag.Parse()
 
-	slog.Info("Starting eBPF Adblocker...", "interface", *ifname)
+	slog.Info("starting eBPF Adblocker...", "interface", *ifname)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -49,6 +49,8 @@ func main() {
 		slog.Error("could not open blocklist file", "err", err)
 		os.Exit(1)
 	}
+
+	// load blocklist file
 	reader := bufio.NewReader(file)
 	line, err := readLine(reader)
 	for err == nil {
@@ -63,16 +65,15 @@ func main() {
 			ip := parts[0]
 			domain := parts[1]
 
-			// Parse the URL Path
-			var dnsName [256]uint8
-			var convertedName [256]uint8
+			var recordName [256]uint8
+			var domainKey [256]uint8
 
-			copy(dnsName[:], domain)
+			copy(recordName[:], domain)
 
 			ipAddr, _ := ipconv.IPv4ToInt(net.ParseIP(ip))
 			arecord := htonl(ipAddr)
-			copy(convertedName[:], convertDomain(domain))
-			err = dns.DnsMap.Put(convertedName, dnsDnsReplace{dnsName, arecord})
+			copy(domainKey[:], convertDomain(domain))
+			err = dns.DnsMap.Put(domainKey, dnsDnsReplace{recordName, arecord})
 			if err != nil {
 				slog.Error("add to map failed", "domain", domain, "err", err)
 			} else {
@@ -132,17 +133,15 @@ func main() {
 		slog.Error("failed to replace tc filter", "err", err)
 	}
 
-	slog.Info("Press Ctrl-C to exit and remove the program")
+	slog.Info("press Ctrl-C to exit...")
 
-	// Drop the logs
-	go cat()
+	go printTracePipe()
 	<-ctx.Done()
-	slog.Info("Removing eBPF programs")
-
+	slog.Info("removing eBPF programs")
 	cleanup(ifname)
 }
 
-func cleanup(ifname *string) error {
+func cleanup(ifname *string) {
 	link, err := netlink.LinkByName(*ifname)
 	if err != nil {
 		slog.Error("could not find iface: %v", err)
@@ -177,8 +176,6 @@ func cleanup(ifname *string) error {
 			slog.Error("could not get remove filter", "err", err)
 		}
 	}
-
-	return nil
 }
 
 func readLine(r *bufio.Reader) (string, error) {
@@ -194,7 +191,7 @@ func readLine(r *bufio.Reader) (string, error) {
 	return string(ln), err
 }
 
-func cat() {
+func printTracePipe() {
 	file, err := os.Open("/sys/kernel/tracing/trace_pipe")
 	if err != nil {
 		slog.Error("could not read trace_pipe", "err", err)
@@ -212,7 +209,6 @@ func cat() {
 		}
 
 		fmt.Printf("%s", line)
-
 	}
 }
 
